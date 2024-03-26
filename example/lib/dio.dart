@@ -27,13 +27,15 @@ void main() async {
   //    },
   //  ));
   dio.interceptors
-    ..add(InterceptorsWrapper(
-      onRequest: (options, handler) {
-        // return handler.resolve( Response(data:"xxx"));
-        // return handler.reject( DioError(message: "eh"));
-        return handler.next(options);
-      },
-    ))
+    ..add(
+      InterceptorsWrapper(
+        onRequest: (options, handler) {
+          // return handler.resolve( Response(data:"xxx"));
+          // return handler.reject( DioException(message: "eh"));
+          return handler.next(options);
+        },
+      ),
+    )
     ..add(LogInterceptor(responseBody: false)); //Open log;
 
   Response response = await dio.get('https://pub.dev/');
@@ -44,9 +46,7 @@ void main() async {
     './example/xx.html',
     queryParameters: {'a': 1},
     onReceiveProgress: (received, total) {
-      if (total != -1) {
-        print('$received,$total');
-      }
+      print('received: $received, total: $total');
     },
   );
 

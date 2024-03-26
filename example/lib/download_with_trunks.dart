@@ -4,20 +4,20 @@ import 'dart:io';
 import 'package:dio/dio.dart';
 
 void main() async {
-  final url = 'http://download.dcloud.net.cn/HBuilder.9.0.2.macosx_64.dmg';
-  final savePath = './example/HBuilder.9.0.2.macosx_64.dmg';
+  final url = 'https://avatars.githubusercontent.com/u/0';
+  final savePath = './example/avatar.png';
 
-//  final url = "https://www.baidu.com/img/bdlogo.gif";
-//  final savePath = "./example/bg.gif";
-
-  await downloadWithChunks(url, savePath, onReceiveProgress: (received, total) {
-    if (total != -1) {
+  await downloadWithChunks(
+    url,
+    savePath,
+    onReceiveProgress: (received, total) {
+      if (total <= 0) return;
       print('${(received / total * 100).floor()}%');
-    }
-  });
+    },
+  );
 }
 
-/// Downloading by spiting as file in chunks
+/// Downloading by splitting as file in chunks
 Future downloadWithChunks(
   url,
   savePath, {
@@ -66,10 +66,9 @@ Future downloadWithChunks(
 
   final response = await downloadChunk(url, 0, firstChunkSize, 0);
   if (response.statusCode == 206) {
-    total = int.parse(response.headers
-        .value(HttpHeaders.contentRangeHeader)!
-        .split('/')
-        .last);
+    total = int.parse(
+      response.headers.value(HttpHeaders.contentRangeHeader)!.split('/').last,
+    );
     final reserved =
         total - int.parse(response.headers.value(Headers.contentLengthHeader)!);
     int chunk = (reserved / firstChunkSize).ceil() + 1;

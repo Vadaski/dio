@@ -3,16 +3,18 @@ import 'dart:io';
 
 import '../adapter.dart';
 import '../cancel_token.dart';
+import '../dio_exception.dart';
 import '../dio_mixin.dart';
 import '../response.dart';
 import '../dio.dart';
 import '../headers.dart';
 import '../options.dart';
-import '../dio_error.dart';
 import '../adapters/io_adapter.dart';
 
+/// Create the [Dio] instance for native platforms.
 Dio createDio([BaseOptions? baseOptions]) => DioForNative(baseOptions);
 
+/// Implements features for [Dio] on native platforms.
 class DioForNative with DioMixin implements Dio {
   /// Create Dio instance with default [BaseOptions].
   /// It is recommended that an application use only the same DIO singleton.
@@ -34,31 +36,38 @@ class DioForNative with DioMixin implements Dio {
     Object? data,
     Options? options,
   }) async {
-    // We set the `responseType` to [ResponseType.STREAM] to retrieve the
-    // response stream.
     options ??= DioMixin.checkOptions('GET', options);
-
-    // Receive data with stream.
-    options.responseType = ResponseType.stream;
-    Response<ResponseBody> response;
+    // Manually set the `responseType` to [ResponseType.stream]
+    // to retrieve the response stream.
+    // Do not modify previous options.
+    options = options.copyWith(responseType: ResponseType.stream);
+    final Response<ResponseBody> response;
     try {
       response = await request<ResponseBody>(
         urlPath,
         data: data,
         options: options,
         queryParameters: queryParameters,
-        cancelToken: cancelToken ?? CancelToken(),
+        cancelToken: cancelToken,
       );
-    } on DioError catch (e) {
-      if (e.type == DioErrorType.badResponse) {
-        if (e.response!.requestOptions.receiveDataWhenStatusError == true) {
+    } on DioException catch (e) {
+      if (e.type == DioExceptionType.badResponse) {
+        final response = e.response!;
+        if (response.requestOptions.receiveDataWhenStatusError == true) {
+          final ResponseType implyResponseType;
+          final contentType = response.headers.value(Headers.contentTypeHeader);
+          if (contentType != null && contentType.startsWith('text/')) {
+            implyResponseType = ResponseType.plain;
+          } else {
+            implyResponseType = ResponseType.json;
+          }
           final res = await transformer.transformResponse(
-            e.response!.requestOptions..responseType = ResponseType.json,
-            e.response!.data as ResponseBody,
+            response.requestOptions.copyWith(responseType: implyResponseType),
+            response.data as ResponseBody,
           );
-          e.response!.data = res;
+          response.data = res;
         } else {
-          e.response!.data = null;
+          response.data = null;
         }
       }
       rethrow;
@@ -80,7 +89,7 @@ class DioForNative with DioMixin implements Dio {
       );
     }
 
-    // If the directory (or file) doesn't exist yet, the entire method fails.
+    // If the file already exists, the method fails.
     file.createSync(recursive: true);
 
     // Shouldn't call file.writeAsBytesSync(list, flush: flush),
@@ -90,7 +99,6 @@ class DioForNative with DioMixin implements Dio {
 
     // Create a Completer to notify the success/error state.
     final completer = Completer<Response>();
-    Future<Response> future = completer.future;
     int received = 0;
 
     // Stream<Uint8List>
@@ -115,9 +123,9 @@ class DioForNative with DioMixin implements Dio {
       if (!closed) {
         closed = true;
         await asyncWrite;
-        await raf.close();
+        await raf.close().catchError((_) => raf);
         if (deleteOnError && file.existsSync()) {
-          await file.delete();
+          await file.delete().catchError((_) => file);
         }
       }
     }
@@ -135,12 +143,17 @@ class DioForNative with DioMixin implements Dio {
           if (cancelToken == null || !cancelToken.isCancelled) {
             subscription.resume();
           }
-        }).catchError((dynamic e, StackTrace s) async {
+        }).catchError((Object e) async {
           try {
-            await subscription.cancel();
+            await subscription.cancel().catchError((_) {});
+            closed = true;
+            await raf.close().catchError((_) => raf);
+            if (deleteOnError && file.existsSync()) {
+              await file.delete().catchError((_) => file);
+            }
           } finally {
             completer.completeError(
-              DioMixin.assureDioError(e, response.requestOptions, s),
+              DioMixin.assureDioException(e, response.requestOptions),
             );
           }
         });
@@ -149,20 +162,20 @@ class DioForNative with DioMixin implements Dio {
         try {
           await asyncWrite;
           closed = true;
-          await raf.close();
+          await raf.close().catchError((_) => raf);
           completer.complete(response);
-        } catch (e, s) {
+        } catch (e) {
           completer.completeError(
-            DioMixin.assureDioError(e, response.requestOptions, s),
+            DioMixin.assureDioException(e, response.requestOptions),
           );
         }
       },
-      onError: (e, s) async {
+      onError: (e) async {
         try {
           await closeAndDelete();
         } finally {
           completer.completeError(
-            DioMixin.assureDioError(e, response.requestOptions, s),
+            DioMixin.assureDioException(e, response.requestOptions),
           );
         }
       },
@@ -172,25 +185,6 @@ class DioForNative with DioMixin implements Dio {
       await subscription.cancel();
       await closeAndDelete();
     });
-
-    final timeout = response.requestOptions.receiveTimeout;
-    if (timeout != null) {
-      future = future.timeout(timeout).catchError(
-        (dynamic e, StackTrace s) async {
-          await subscription.cancel();
-          await closeAndDelete();
-          if (e is TimeoutException) {
-            throw DioError.receiveTimeout(
-              timeout: timeout,
-              requestOptions: response.requestOptions,
-              stackTrace: s,
-            );
-          } else {
-            throw e;
-          }
-        },
-      );
-    }
-    return DioMixin.listenCancelForAsyncTask(cancelToken, future);
+    return DioMixin.listenCancelForAsyncTask(cancelToken, completer.future);
   }
 }

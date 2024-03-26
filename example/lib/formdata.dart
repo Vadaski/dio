@@ -1,13 +1,8 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
-
-void showProgress(received, total) {
-  if (total != -1) {
-    print((received / total * 100).toStringAsFixed(0) + '%');
-  }
-}
 
 Future<FormData> formData1() async {
   return FormData.fromMap({
@@ -34,22 +29,28 @@ Future<FormData> formData2() async {
   final formData = FormData();
 
   formData.fields
-    ..add(MapEntry(
-      'name',
-      'wendux',
-    ))
-    ..add(MapEntry(
-      'age',
-      '25',
-    ));
+    ..add(
+      MapEntry(
+        'name',
+        'wendux',
+      ),
+    )
+    ..add(
+      MapEntry(
+        'age',
+        '25',
+      ),
+    );
 
-  formData.files.add(MapEntry(
-    'file',
-    await MultipartFile.fromFile(
-      './example/xx.png',
-      filename: 'xx.png',
+  formData.files.add(
+    MapEntry(
+      'file',
+      await MultipartFile.fromFile(
+        './example/xx.png',
+        filename: 'xx.png',
+      ),
     ),
-  ));
+  );
 
   formData.files.addAll([
     MapEntry(
@@ -85,16 +86,17 @@ void main() async {
   final dio = Dio();
   dio.options.baseUrl = 'http://localhost:3000/';
   dio.interceptors.add(LogInterceptor());
-  // dio.interceptors.add(LogInterceptor(requestBody: true));
-  dio.httpClientAdapter = IOHttpClientAdapter()
-    ..onHttpClientCreate = (client) {
+  dio.httpClientAdapter = IOHttpClientAdapter(
+    createHttpClient: () {
+      final client = HttpClient();
       client.findProxy = (uri) {
         // Proxy all request to localhost:8888
         return 'PROXY localhost:8888';
       };
       client.badCertificateCallback = (cert, host, port) => true;
       return client;
-    };
+    },
+  );
   Response response;
 
   final data1 = await formData1();
@@ -107,13 +109,11 @@ void main() async {
   print(utf8.decode(await data3.readAsBytes()));
 
   response = await dio.post(
-    //"/upload",
     'http://localhost:3000/upload',
     data: data3,
-    onSendProgress: (received, total) {
-      if (total != -1) {
-        print('${(received / total * 100).toStringAsFixed(0)}%');
-      }
+    onSendProgress: (sent, total) {
+      if (total <= 0) return;
+      print('percentage: ${(sent / total * 100).toStringAsFixed(0)}%');
     },
   );
   print(response);

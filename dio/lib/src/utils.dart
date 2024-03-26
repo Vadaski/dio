@@ -1,17 +1,33 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:developer' as dev;
 
 import 'options.dart';
 import 'parameter.dart';
+
+// See https://github.com/flutter/flutter/pull/112122.
+const kIsWeb = bool.hasEnvironment('dart.library.js_util')
+    ? bool.fromEnvironment('dart.library.js_util')
+    : identical(0, 0.0);
+
+// For the web platform, an inline `bool.fromEnvironment` translates to
+// `core.bool.fromEnvironment` instead of correctly being replaced by the
+// constant value found in the environment at build time.
+//
+// See https://github.com/flutter/flutter/issues/51186.
+const kReleaseMode = bool.fromEnvironment('dart.vm.product');
 
 /// Pipes all data and errors from [stream] into [sink]. Completes [Future] once
 /// [stream] is done. Unlike [store], [sink] remains open after [stream] is
 /// done.
 Future writeStreamToSink(Stream stream, EventSink sink) {
   final completer = Completer();
-  stream.listen(sink.add,
-      onError: sink.addError, onDone: () => completer.complete());
+  stream.listen(
+    sink.add,
+    onError: sink.addError,
+    onDone: () => completer.complete(),
+  );
   return completer.future;
 }
 
@@ -27,20 +43,33 @@ Encoding encodingForCharset(String? charset, [Encoding fallback = latin1]) {
 typedef DioEncodeHandler = String? Function(String key, Object? value);
 
 String encodeMap(
-  data,
+  Object data,
   DioEncodeHandler handler, {
   bool encode = true,
+  bool isQuery = false,
   ListFormat listFormat = ListFormat.multi,
 }) {
   final urlData = StringBuffer('');
   bool first = true;
-  final leftBracket = encode ? '%5B' : '[';
-  final rightBracket = encode ? '%5D' : ']';
-  final encodeComponent = encode ? Uri.encodeQueryComponent : (e) => e;
-  void urlEncode(dynamic sub, String path) {
+  // URL Query parameters are generally encoded but not their
+  // index or nested names in square brackets.
+  // When [encode] is false, for example for [FormData], nothing is encoded.
+  final leftBracket = isQuery || !encode ? '[' : '%5B';
+  final rightBracket = isQuery || !encode ? ']' : '%5D';
+
+  final String Function(String) encodeComponent =
+      encode ? Uri.encodeQueryComponent : (e) => e;
+  Object? maybeEncode(Object? value) {
+    if (!isQuery || value == null || value is! String) {
+      return value;
+    }
+    return encodeComponent(value);
+  }
+
+  void urlEncode(Object? sub, String path) {
     // Detect if the list format for this parameter derivatives from default.
     final format = sub is ListParam ? sub.format : listFormat;
-    final separatorChar = _getSeparatorChar(format);
+    final separatorChar = _getSeparatorChar(format, isQuery);
 
     if (sub is ListParam) {
       // Need to unwrap all param objects here
@@ -52,30 +81,30 @@ String encodeMap(
         for (int i = 0; i < sub.length; i++) {
           final isCollection =
               sub[i] is Map || sub[i] is List || sub[i] is ListParam;
-          if (listFormat == ListFormat.multi) {
+          if (format == ListFormat.multi) {
             urlEncode(
-              sub[i],
+              maybeEncode(sub[i]),
               '$path${isCollection ? '$leftBracket$i$rightBracket' : ''}',
             );
           } else {
             // Forward compatibility
             urlEncode(
-              sub[i],
+              maybeEncode(sub[i]),
               '$path$leftBracket${isCollection ? i : ''}$rightBracket',
             );
           }
         }
       } else {
-        urlEncode(sub.join(separatorChar), path);
+        urlEncode(sub.map(maybeEncode).join(separatorChar), path);
       }
     } else if (sub is Map) {
       sub.forEach((k, v) {
         if (path == '') {
-          urlEncode(v, '${encodeComponent(k as String)}');
+          urlEncode(maybeEncode(v), encodeComponent(k));
         } else {
           urlEncode(
-            v,
-            '$path$leftBracket${encodeComponent(k as String)}$rightBracket',
+            maybeEncode(v),
+            '$path$leftBracket${encodeComponent(k)}$rightBracket',
           );
         }
       });
@@ -96,12 +125,12 @@ String encodeMap(
   return urlData.toString();
 }
 
-String _getSeparatorChar(ListFormat collectionFormat) {
+String _getSeparatorChar(ListFormat collectionFormat, bool isQuery) {
   switch (collectionFormat) {
     case ListFormat.csv:
       return ',';
     case ListFormat.ssv:
-      return ' ';
+      return isQuery ? '%20' : ' ';
     case ListFormat.tsv:
       return r'\t';
     case ListFormat.pipes:
@@ -118,4 +147,16 @@ Map<String, V> caseInsensitiveKeyMap<V>([Map<String, V>? value]) {
   );
   if (value != null && value.isNotEmpty) map.addAll(value);
   return map;
+}
+
+// TODO(Alex): Provide a configurable property on the Dio class once https://github.com/cfug/dio/discussions/1982 has made some progress.
+void debugLog(String message, StackTrace stackTrace) {
+  if (!kReleaseMode) {
+    dev.log(
+      message,
+      level: 900,
+      name: '🔔 Dio',
+      stackTrace: stackTrace,
+    );
+  }
 }

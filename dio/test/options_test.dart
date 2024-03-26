@@ -1,12 +1,51 @@
 @TestOn('vm')
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
+import 'package:dio/io.dart';
+import 'package:dio/src/utils.dart';
+import 'package:mockito/mockito.dart';
 import 'package:test/test.dart';
 
 import 'mock/adapters.dart';
+import 'mock/http_mock.mocks.dart';
+import 'utils.dart';
 
 void main() {
+  setUp(startServer);
+  tearDown(stopServer);
+
+  test('headers are kept after redirects', () async {
+    final dio = Dio(
+      BaseOptions(
+        baseUrl: serverUrl.toString(),
+        headers: {'x-test-base': 'test-base'},
+      ),
+    );
+    final response = await dio.get(
+      '/redirect',
+      options: Options(headers: {'x-test-header': 'test-value'}),
+    );
+    expect(response.isRedirect, isTrue);
+    expect(
+      response.data['headers']['x-test-base'].single,
+      equals('test-base'),
+    );
+    expect(
+      response.data['headers']['x-test-header'].single,
+      equals('test-value'),
+    );
+    expect(
+      response.requestOptions.headers['x-test-base'],
+      equals('test-base'),
+    );
+    expect(
+      response.requestOptions.headers['x-test-header'],
+      equals('test-value'),
+    );
+  });
+
   test('options', () {
     final map = {'a': '5'};
     final mapOverride = {'b': '6'};
@@ -103,7 +142,7 @@ void main() {
   });
   test('options content-type', () {
     const contentType = 'text/html';
-    const contentTypeJson = 'appliction/json';
+    const contentTypeJson = 'application/json';
     final headers = {'content-type': contentType};
     final jsonHeaders = {'content-type': contentTypeJson};
 
@@ -251,7 +290,7 @@ void main() {
     final r4 = await dio.post('', data: '');
     expect(
       r4.requestOptions.headers[Headers.contentTypeHeader],
-      null,
+      Headers.jsonContentType,
     );
 
     final r5 = await dio.get(
@@ -308,6 +347,20 @@ void main() {
       r9.requestOptions.headers[Headers.contentTypeHeader],
       Headers.jsonContentType,
     );
+
+    final r10 = await dio.post('', data: FormData());
+    expect(
+      r10.requestOptions.contentType,
+      startsWith(Headers.multipartFormDataContentType),
+    );
+
+    // Regression: https://github.com/cfug/dio/issues/1834
+    final r11 = await dio.get('');
+    expect(r11.data, '');
+    final r12 = await dio.get<Map>('');
+    expect(r12.data, null);
+    final r13 = await dio.get<Map<String, Object>>('');
+    expect(r13.data, null);
   });
 
   test('default content-type 2', () async {
@@ -342,47 +395,98 @@ void main() {
     expect(r3.headers[Headers.contentTypeHeader], null);
   });
 
-  test("responseDecoder return null", () async {
+  test('responseDecoder return null', () async {
     final dio = Dio();
     dio.options.responseDecoder = (_, __, ___) => null;
     dio.options.baseUrl = EchoAdapter.mockBase;
     dio.httpClientAdapter = EchoAdapter();
 
-    final Response response = await dio.get("");
+    final Response response = await dio.get('');
 
     expect(response.data, null);
   });
 
-  test('forceConvert responseType', () async {
-    final dio = Dio(BaseOptions(
-      baseUrl: MockAdapter.mockBase,
-    )) //
-      ..httpClientAdapter = MockAdapter();
-    final expectedResponseData = <String, dynamic>{"code": 0, "result": "ok"};
+  test('responseDecoder can return Future<String?>', () async {
+    final dio = Dio();
+    dio.options.responseDecoder = (_, __, ___) => Future.value('example');
+    dio.options.baseUrl = EchoAdapter.mockBase;
+    dio.httpClientAdapter = EchoAdapter();
 
-    final response = await dio.get<Map<String, dynamic>>('/test-force-convert');
-    expect(response.data, expectedResponseData);
+    final Response response = await dio.get('');
 
-    final textResponse = await dio.get<dynamic>('/test-force-convert');
-    expect(textResponse.data, json.encode(expectedResponseData));
+    expect(response.data, 'example');
+  });
 
-    final textResponse2 = await dio.get<String>('/test-force-convert');
-    expect(textResponse2.data, json.encode(expectedResponseData));
+  test('responseDecoder can return String?', () async {
+    final dio = Dio();
+    dio.options.responseDecoder = (_, __, ___) => 'example';
+    dio.options.baseUrl = EchoAdapter.mockBase;
+    dio.httpClientAdapter = EchoAdapter();
+
+    final Response response = await dio.get('');
+
+    expect(response.data, 'example');
+  });
+
+  test('requestEncoder can return Future<List<int>>', () async {
+    final dio = Dio();
+    dio.options.requestEncoder = (data, _) => Future.value(utf8.encode(data));
+    dio.options.baseUrl = EchoAdapter.mockBase;
+    dio.httpClientAdapter = EchoAdapter();
+
+    final Response response = await dio.get('');
+
+    expect(response.statusCode, 200);
+  });
+
+  test('requestEncoder can return List<int>', () async {
+    final dio = Dio();
+    dio.options.requestEncoder = (data, _) => utf8.encode(data);
+    dio.options.baseUrl = EchoAdapter.mockBase;
+    dio.httpClientAdapter = EchoAdapter();
+
+    final Response response = await dio.get('');
+
+    expect(response.statusCode, 200);
+  });
+
+  test('invalid response type throws exceptions', () async {
+    final dio = Dio(
+      BaseOptions(
+        baseUrl: MockAdapter.mockBase,
+        contentType: Headers.jsonContentType,
+      ),
+    )..httpClientAdapter = MockAdapter();
+
+    // Throws nothing.
+    await dio.get<dynamic>('/test-plain-text-content-type');
+    await dio.get<String>('/test-plain-text-content-type');
+
+    // Throws a type error during cast.
+    expectLater(
+      dio.get<Map<String, dynamic>>('/test-plain-text-content-type'),
+      throwsA((e) => e is DioException && e.error is TypeError),
+    );
   });
 
   test('option invalid base url', () {
-    final opt1 = 'blob:http://localhost/xyz123';
-    final opt2 = 'https://pub.dev';
-    final opt3 = 'https://';
-    final opt4 = 'https://loremipsum/';
-    final opt5 = '';
-    final opt6 = 'pub.dev';
-    expect(Uri.parse(opt1).host.isNotEmpty, false);
-    expect(Uri.parse(opt2).host.isNotEmpty, true);
-    expect(Uri.parse(opt3).host.isNotEmpty, false);
-    expect(Uri.parse(opt4).host.isNotEmpty, true);
-    expect(Uri.parse(opt5).host.isNotEmpty, false);
-    expect(Uri.parse(opt6).host.isNotEmpty, false);
+    final invalidUrls = <String>[
+      'blob:http://localhost/xyz123',
+      'https://',
+      'pub.dev',
+    ];
+    final validUrls = <String>[
+      '',
+      'https://pub.dev',
+      'https://loremipsum/',
+      if (kIsWeb) 'api/',
+    ];
+    for (final url in invalidUrls) {
+      expect(() => BaseOptions(baseUrl: url), throwsA(isA<ArgumentError>()));
+    }
+    for (final url in validUrls) {
+      expect(BaseOptions(baseUrl: url), isA<BaseOptions>());
+    }
   });
 
   test('Throws when using invalid methods', () async {
@@ -390,18 +494,18 @@ void main() {
     void testInvalidArgumentException(String method) async {
       await expectLater(
         dio.fetch(RequestOptions(path: 'http://127.0.0.1', method: method)),
-        throwsA((e) => e is DioError && e.error is ArgumentError),
+        throwsA((e) => e is DioException && e.error is ArgumentError),
       );
     }
 
-    const String separators = "\t\n\r()<>@,;:\\/[]?={}";
+    const String separators = '\t\n\r()<>@,;:\\/[]?={}';
     for (int i = 0; i < separators.length; i++) {
       final String separator = separators.substring(i, i + 1);
       testInvalidArgumentException(separator);
-      testInvalidArgumentException("${separator}CONNECT");
-      testInvalidArgumentException("CONN${separator}ECT");
-      testInvalidArgumentException("CONN$separator${separator}ECT");
-      testInvalidArgumentException("CONNECT$separator");
+      testInvalidArgumentException('${separator}CONNECT');
+      testInvalidArgumentException('CONN${separator}ECT');
+      testInvalidArgumentException('CONN$separator${separator}ECT');
+      testInvalidArgumentException('CONNECT$separator');
     }
   });
 
@@ -428,5 +532,62 @@ void main() {
       );
       expect(response.data, 'test');
     }
+  });
+
+  test('Headers can be case-sensitive', () async {
+    final dio = Dio();
+    final client = MockHttpClient();
+    dio.httpClientAdapter = IOHttpClientAdapter(createHttpClient: () => client);
+
+    final headerMap = caseInsensitiveKeyMap();
+    late MockHttpHeaders mockRequestHeaders;
+    when(client.openUrl(any, any)).thenAnswer((_) async {
+      final request = MockHttpClientRequest();
+      final response = MockHttpClientResponse();
+      mockRequestHeaders = MockHttpHeaders();
+      when(
+        mockRequestHeaders.set(
+          any,
+          any,
+          preserveHeaderCase: anyNamed('preserveHeaderCase'),
+        ),
+      ).thenAnswer((invocation) {
+        final args = invocation.positionalArguments.cast<String>();
+        final preserveHeaderCase =
+            invocation.namedArguments[#preserveHeaderCase] as bool;
+        headerMap[preserveHeaderCase ? args[0] : args[0].toLowerCase()] =
+            args[1];
+      });
+      when(request.headers).thenAnswer((_) => mockRequestHeaders);
+      when(request.close()).thenAnswer((_) => Future.value(response));
+      when(request.addStream(any)).thenAnswer((_) async => null);
+      when(response.headers).thenReturn(MockHttpHeaders());
+      when(response.statusCode).thenReturn(200);
+      when(response.reasonPhrase).thenReturn('OK');
+      when(response.isRedirect).thenReturn(false);
+      when(response.redirects).thenReturn([]);
+      when(response.cast()).thenAnswer((_) => Stream<Uint8List>.empty());
+      return Future.value(request);
+    });
+
+    await dio.get(
+      '',
+      options: Options(
+        preserveHeaderCase: true,
+        headers: {'Sensitive': 'test', 'insensitive': 'test'},
+      ),
+    );
+    expect(headerMap['Sensitive'], 'test');
+    expect(headerMap['insensitive'], 'test');
+    headerMap.clear();
+
+    await dio.get(
+      '',
+      options: Options(
+        headers: {'Sensitive': 'test', 'insensitive': 'test'},
+      ),
+    );
+    expect(headerMap['sensitive'], 'test');
+    expect(headerMap['insensitive'], 'test');
   });
 }

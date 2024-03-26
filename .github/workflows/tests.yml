@@ -1,160 +1,113 @@
-name: Tests
+name: Verify packages abilities
 
 on:
   push:
     branches:
       - main
+      - '6.0.0'
     paths-ignore:
       - "**.md"
-  pull_request:
+  pull_request_target:
     branches:
       - main
+      - '6.0.0'
     paths-ignore:
       - "**.md"
 
+# Ensure that new pushes/updates cancel running jobs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  pull-requests: write
+
+defaults:
+  run:
+    shell: bash -leo pipefail {0}
+
 jobs:
-  format:
-    name: Check formatting
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        directory: [
-          "dio",
-          "example",
-          "example_flutter_app",
-          "plugins/cookie_manager",
-          "plugins/http2_adapter",
-          "plugins/native_dio_adapter"
-        ]
-    defaults:
-      run:
-        working-directory: ${{ matrix.directory }}
-    steps:
-      - uses: actions/checkout@v3
-      - uses: dart-lang/setup-dart@v1.3
-        with:
-          sdk: stable
-      - run: dart format --set-exit-if-changed .
-
-  analyze:
-    needs: format
-    name: Analyze Dart-only libraries
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        directory: ["dio", "example", "plugins/cookie_manager", "plugins/http2_adapter"]
-    defaults:
-      run:
-        working-directory: ${{ matrix.directory }}
-    steps:
-      - uses: actions/checkout@v3
-      - name: Prepare Dart SDK
-        uses: dart-lang/setup-dart@v1.3
-        with:
-          sdk: stable
-      - name: Analyze
-        run: dart pub get && dart analyze
-
-  analyze_flutter:
-    needs: format
-    name: Analyze Flutter libraries
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        directory: ["example_flutter_app", "plugins/native_dio_adapter"]
-    defaults:
-      run:
-        working-directory: ${{ matrix.directory }}
-    steps:
-      - uses: actions/checkout@v3
-      - name: Prepare Flutter SDK
-        uses: subosito/flutter-action@v2.8.0
-        with:
-          cache: true
-          channel: stable
-      - name: Analyze
-        run: flutter pub get && flutter analyze
-
-  test_dio:
-    needs: [analyze, analyze_flutter]
-    name: Run unit tests with dio
+  workflows:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        sdk: [ 2.15.0, stable, beta ]
-        platform: [ vm, chrome ]
+        sdk: [ min, stable, beta ]
+    env:
+      TEST_PRESET: all
     steps:
-      - uses: actions/checkout@v3
-      - uses: dart-lang/setup-dart@v1.3
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
         with:
-          sdk: ${{ matrix.sdk }}
-      - run: |
-          chmod +x ./scripts/prepare_pinning_certs.sh
-          ./scripts/prepare_pinning_certs.sh
-        shell: bash
+          cache: true
+          flutter-version: ${{ matrix.sdk == 'min' && '2.8.0' || '' }}
+          channel: ${{ matrix.sdk == 'min' && '' || matrix.channel }}
       - run: dart pub get
-        working-directory: dio
-      - run: dart test --chain-stack-traces --platform=${{ matrix.platform }}
-        working-directory: dio
-
-  test_plugins:
-    needs: [analyze, analyze_flutter]
-    name: Run unit tests with plugins
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        sdk: [ 2.15.0, stable, beta ]
-        directory: ["plugins/cookie_manager", "plugins/http2_adapter"]
-    steps:
-      - uses: actions/checkout@v3
-      - uses: dart-lang/setup-dart@v1.3
+      - uses: bluefireteam/melos-action@v3
         with:
-          sdk: ${{ matrix.sdk }}
-      - run: |
-          chmod +x ./scripts/prepare_pinning_certs.sh
-          ./scripts/prepare_pinning_certs.sh
-        shell: bash
-      - run: dart pub get
-        working-directory: ${{ matrix.directory }}
-      - run: dart test --chain-stack-traces
-        working-directory: ${{ matrix.directory }}
-
-  test_flutter_plugins:
-    needs: [analyze, analyze_flutter]
-    name: Run unit tests with Flutter plugins
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        channel: [ min, stable, beta ]
-        directory: ["plugins/native_dio_adapter"]
-    defaults:
-      run:
-        working-directory: ${{ matrix.directory }}
-    steps:
-      - uses: actions/checkout@v3
-      - name: Prepare Flutter SDK
-        uses: subosito/flutter-action@v2.8.0
+          run-bootstrap: false
+      - name: Check satisfied packages
+        run: |
+          dart ./scripts/melos_packages.dart
+          echo $(cat .melos_packages) >> $GITHUB_ENV
+      - name: Melos Bootstrap
+        run: melos bootstrap
+      - name: '[Verify step] Format'
+        if: ${{ matrix.sdk == 'stable' }}
+        run: melos run format
+      - name: '[Verify step] Analyze packages'
+        if: ${{ matrix.sdk == 'stable' }}
+        run: melos run analyze
+      - name: '[Verify step] Publish dry-run'
+        if: ${{ matrix.sdk == 'stable' }}
+        run: melos run publish-dry-run
+      # Tests
+      - run: ./scripts/prepare_pinning_certs.sh
+      - name: Install proxy for tests
+        run: sudo apt-get update && sudo apt-get install -y squid mkcert
+      - name: Start local httpbun
+        run: |
+          mkcert -install
+          mkcert -cert-file '/tmp/cert.pem' -key-file '/tmp/key.pem' httpbun.local
+          echo '127.0.0.1 httpbun.local' | sudo tee --append /etc/hosts
+          docker run \
+            --name httpbun \
+            --detach \
+            --publish 443:443 \
+            --volume /tmp:/tmp:ro \
+            --env HTTPBUN_TLS_CERT=/tmp/cert.pem \
+            --env HTTPBUN_TLS_KEY=/tmp/key.pem \
+            --pull always \
+            sharat87/httpbun
+          sleep 1
+          curl --fail --silent --show-error https://httpbun.local/any
+      - name: Use httpbun.local for tests
+        run: melos run httpbun:local
+      - name: '[Verify step] Test Dart packages [VM]'
+        run: melos run test:vm
+      - name: Use httpbun.com for VM/Flutter tests
+        run: melos run httpbun:com
+      - name: '[Verify step] Test Dart packages [Chrome]'
+        run: melos run test:web:chrome
+      - name: '[Verify step] Test Dart packages [Firefox]'
+        run: melos run test:web:firefox
+      - name: '[Verify step] Test Flutter packages'
+        run: melos run test:flutter
+      # Coverage
+      - name: '[Coverage] Format & print test coverage'
+        if: ${{ matrix.sdk == 'stable' }}
+        run: melos run coverage:show
+      - name: '[Coverage] Coverage Report'
+        uses: clearlyip/code-coverage-report-action@v4
+        id: code_coverage_report
+        if: ${{ matrix.sdk == 'stable' && github.actor != 'dependabot[bot]'}}
         with:
-          cache: true
-          flutter-version: ${{ matrix.channel == 'min' && '3.3.0' || '' }}
-          channel: ${{ matrix.channel == 'min' && 'stable' || matrix.channel }}
-      - run: flutter test
-
-  build_example_android:
-    needs: [test_dio, test_plugins, test_flutter_plugins]
-    name: Build Android example
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: example_flutter_app
-    steps:
-      - uses: actions/checkout@v3
-      - uses: subosito/flutter-action@v2.8.0
+          artifact_download_workflow_names: 'Verify packages abilities,coverage_baseline'
+          filename: 'coverage/cobertura.xml'
+      - name: '[Coverage] Add PR comment'
+        uses: marocchino/sticky-pull-request-comment@v2
+        #Make sure the report was generated and that the event is actually a pull request, run if failed or success
+        if: ${{  matrix.sdk == 'stable' && github.actor != 'dependabot[bot]' && steps.code_coverage_report.outputs.file != '' && (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && (success() || failure()) }}
         with:
-          cache: true
-          channel: stable
-      - run: flutter pub get
-      - run: flutter build apk
+          recreate: true
+          path: code-coverage-results.md

@@ -2,16 +2,14 @@
 
 [![Pub](https://img.shields.io/pub/v/dio_cookie_manager.svg)](https://pub.dev/packages/dio_cookie_manager)
 
-A cookie manager for [dio](https://github.com/cfug/dio). 
+A cookie manager combines cookie_jar and dio, based on the interceptor algorithm.
 
 ## Getting Started
 
 ### Install
 
-```yaml
-dependencies:
-  dio_cookie_manager: ^2.0.0 # latest version
-```
+Add the `dio_cookie_manager` package to your
+[pubspec dependencies](https://pub.dev/packages/dio_cookie_manager/install).
 
 ### Usage
 
@@ -21,7 +19,7 @@ import 'package:dio/dio.dart';
 import 'package:dio_cookie_manager/dio_cookie_manager.dart';
 
 void main() async {
-  final dio =  Dio();
+  final dio = Dio();
   final cookieJar = CookieJar();
   dio.interceptors.add(CookieManager(cookieJar));
   // First request, and save cookies (CookieManager do it).
@@ -55,7 +53,7 @@ so if the application exit, the cookies always exist unless call `delete` explic
 > Note: In flutter, the path passed to `PersistCookieJar` must be valid (exists in phones and with write access).
 > Use [path_provider](https://pub.dev/packages/path_provider) package to get the right path.
 
-In flutter: 
+In flutter:
 
 ```dart
 Future<void> prepareJar() async {
@@ -63,8 +61,30 @@ Future<void> prepareJar() async {
   final String appDocPath = appDocDir.path;
   final jar = PersistCookieJar(
     ignoreExpires: true,
-    storage: FileStorage(appDocPath +"/.cookies/" ),
+    storage: FileStorage(appDocPath + "/.cookies/"),
   );
   dio.interceptors.add(CookieManager(jar));
 }
+```
+
+## Handling Cookies with redirect requests
+
+Redirect requests require extra configuration to parse cookies correctly.
+In shortly:
+- Set `followRedirects` to `false`.
+- Allow `statusCode` from `300` to `399` responses predicated as succeed.
+- Make further requests using the `HttpHeaders.locationHeader`.
+
+For example:
+```dart
+final cookieJar = CookieJar();
+final dio = Dio()
+  ..interceptors.add(CookieManager(cookieJar))
+  ..options.followRedirects = false
+  ..options.validateStatus =
+      (status) => status != null && status >= 200 && status < 400;
+final redirected = await dio.get('/redirection');
+final response = await dio.get(
+  redirected.headers.value(HttpHeaders.locationHeader)!,
+);
 ```

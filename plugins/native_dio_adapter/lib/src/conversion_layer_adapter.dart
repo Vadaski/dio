@@ -24,7 +24,7 @@ class ConversionLayerAdapter implements HttpClientAdapter {
   ) async {
     final request = await _fromOptionsAndStream(options, requestStream);
     final response = await client.send(request);
-    return response.toDioResponseBody();
+    return response.toDioResponseBody(options);
   }
 
   @override
@@ -39,16 +39,26 @@ class ConversionLayerAdapter implements HttpClientAdapter {
       options.uri,
     );
 
-    request.headers.addAll(Map.fromEntries(options.headers.entries
-        .map((e) => MapEntry(e.key, e.value.toString()))));
+    request.headers.addAll(
+      Map.fromEntries(
+        options.headers.entries.map(
+          (e) => MapEntry(
+            options.preserveHeaderCase ? e.key : e.key.toLowerCase(),
+            e.value.toString(),
+          ),
+        ),
+      ),
+    );
 
     request.followRedirects = options.followRedirects;
     request.maxRedirects = options.maxRedirects;
 
     if (requestStream != null) {
-      var completer = Completer<Uint8List>();
-      var sink = ByteConversionSink.withCallback(
-        (bytes) => completer.complete(Uint8List.fromList(bytes)),
+      final completer = Completer<Uint8List>();
+      final sink = ByteConversionSink.withCallback(
+        (bytes) => completer.complete(
+          bytes is Uint8List ? bytes : Uint8List.fromList(bytes),
+        ),
       );
       requestStream.listen(
         sink.add,
@@ -56,21 +66,23 @@ class ConversionLayerAdapter implements HttpClientAdapter {
         onDone: sink.close,
         cancelOnError: true,
       );
-      var bytes = await completer.future;
-
+      final bytes = await completer.future;
       request.bodyBytes = bytes;
     }
-
     return request;
   }
 }
 
 extension on StreamedResponse {
-  ResponseBody toDioResponseBody() {
-    final dioHeaders = headers.entries.map((e) => MapEntry(e.key, [e.value]));
-
+  ResponseBody toDioResponseBody(RequestOptions options) {
+    final dioHeaders = headers.entries.map(
+      (e) => MapEntry(
+        options.preserveHeaderCase ? e.key : e.key.toLowerCase(),
+        [e.value],
+      ),
+    );
     return ResponseBody(
-      Stream.fromFuture(stream.toBytes()),
+      stream.cast<Uint8List>(),
       statusCode,
       headers: Map.fromEntries(dioHeaders),
       isRedirect: isRedirect,

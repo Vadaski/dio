@@ -1,12 +1,24 @@
-import '../dio_error.dart';
+import '../dio_exception.dart';
 import '../dio_mixin.dart';
 import '../options.dart';
 import '../response.dart';
 
 /// [LogInterceptor] is used to print logs during network requests.
-/// It's better to add [LogInterceptor] to the tail of the interceptor queue,
-/// otherwise the changes made in the interceptor behind A will not be printed out.
+/// It should be the last interceptor added,
+/// otherwise modifications by following interceptors will not be logged.
 /// This is because the execution of interceptors is in the order of addition.
+///
+/// **Note**
+/// When used in Flutter, make sure to use `debugPrint` to print logs.
+/// Alternatively `dart:developer`'s `log` function can also be used.
+///
+/// ```dart
+/// dio.interceptors.add(
+///   LogInterceptor(
+///    logPrint: (o) => debugPrint(o.toString()),
+///   ),
+/// );
+/// ```
 class LogInterceptor extends Interceptor {
   LogInterceptor({
     this.request = true,
@@ -15,7 +27,7 @@ class LogInterceptor extends Interceptor {
     this.responseHeader = true,
     this.responseBody = false,
     this.error = true,
-    this.logPrint = print,
+    this.logPrint = _debugPrint,
   });
 
   /// Print request [Options]
@@ -50,7 +62,9 @@ class LogInterceptor extends Interceptor {
 
   @override
   void onRequest(
-      RequestOptions options, RequestInterceptorHandler handler) async {
+    RequestOptions options,
+    RequestInterceptorHandler handler,
+  ) async {
     logPrint('*** Request ***');
     _printKV('uri', options.uri);
     //options.headers;
@@ -64,7 +78,9 @@ class LogInterceptor extends Interceptor {
       _printKV('sendTimeout', options.sendTimeout);
       _printKV('receiveTimeout', options.receiveTimeout);
       _printKV(
-          'receiveDataWhenStatusError', options.receiveDataWhenStatusError);
+        'receiveDataWhenStatusError',
+        options.receiveDataWhenStatusError,
+      );
       _printKV('extra', options.extra);
     }
     if (requestHeader) {
@@ -88,9 +104,9 @@ class LogInterceptor extends Interceptor {
   }
 
   @override
-  void onError(DioError err, ErrorInterceptorHandler handler) async {
+  void onError(DioException err, ErrorInterceptorHandler handler) async {
     if (error) {
-      logPrint('*** DioError ***:');
+      logPrint('*** DioException ***:');
       logPrint('uri: ${err.requestOptions.uri}');
       logPrint('$err');
       if (err.response != null) {
@@ -127,4 +143,11 @@ class LogInterceptor extends Interceptor {
   void _printAll(msg) {
     msg.toString().split('\n').forEach(logPrint);
   }
+}
+
+void _debugPrint(Object? object) {
+  assert(() {
+    print(object);
+    return true;
+  }());
 }

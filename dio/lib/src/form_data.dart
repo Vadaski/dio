@@ -9,6 +9,39 @@ import 'utils.dart';
 /// A class to create readable "multipart/form-data" streams.
 /// It can be used to submit forms and file uploads to http server.
 class FormData {
+  FormData({this.camelCaseContentDisposition = false}) {
+    _init();
+  }
+
+  /// Create FormData instance with a Map.
+  FormData.fromMap(
+    Map<String, dynamic> map, [
+    ListFormat collectionFormat = ListFormat.multi,
+    this.camelCaseContentDisposition = false,
+  ]) {
+    _init();
+    encodeMap(
+      map,
+      (key, value) {
+        if (value is MultipartFile) {
+          files.add(MapEntry(key, value));
+        } else {
+          fields.add(MapEntry(key, value?.toString() ?? ''));
+        }
+        return null;
+      },
+      listFormat: collectionFormat,
+      encode: false,
+    );
+  }
+
+  void _init() {
+    // Assure the boundary unpredictable and unique
+    final random = math.Random();
+    _boundary = _boundaryPrefix +
+        random.nextInt(4294967296).toString().padLeft(10, '0');
+  }
+
   static const String _boundaryPrefix = '--dio-boundary-';
   static const int _boundaryLength = _boundaryPrefix.length + 10;
 
@@ -31,42 +64,6 @@ class FormData {
   bool get isFinalized => _isFinalized;
   bool _isFinalized = false;
   final bool camelCaseContentDisposition;
-
-  FormData({
-    this.camelCaseContentDisposition = false,
-  }) {
-    _init();
-  }
-
-  /// Create FormData instance with a Map.
-  FormData.fromMap(
-    Map<String, dynamic> map, [
-    ListFormat collectionFormat = ListFormat.multi,
-    this.camelCaseContentDisposition = false,
-  ]) {
-    _init();
-    encodeMap(
-      map,
-      (key, value) {
-        if (value == null) return null;
-        if (value is MultipartFile) {
-          files.add(MapEntry(key, value));
-        } else {
-          fields.add(MapEntry(key, value.toString()));
-        }
-        return null;
-      },
-      listFormat: collectionFormat,
-      encode: false,
-    );
-  }
-
-  void _init() {
-    // Assure the boundary unpredictable and unique
-    final random = math.Random();
-    _boundary = _boundaryPrefix +
-        random.nextInt(4294967296).toString().padLeft(10, '0');
-  }
 
   /// Returns the header string for a field.
   String _headerForField(String name, String value) {
@@ -139,7 +136,11 @@ class FormData {
 
   Stream<List<int>> finalize() {
     if (isFinalized) {
-      throw StateError('Already finalized.');
+      throw StateError(
+        'The FormData has already been finalized. '
+        'This typically means you are using '
+        'the same FormData in repeated requests.',
+      );
     }
     _isFinalized = true;
     final controller = StreamController<List<int>>(sync: false);
@@ -174,5 +175,15 @@ class FormData {
   /// Transform the entire FormData contents as a list of bytes asynchronously.
   Future<List<int>> readAsBytes() {
     return Future(() => finalize().reduce((a, b) => [...a, ...b]));
+  }
+
+  // Convenience method to clone finalized FormData when retrying requests.
+  FormData clone() {
+    final clone = FormData();
+    clone.fields.addAll(fields);
+    for (final file in files) {
+      clone.files.add(MapEntry(file.key, file.value.clone()));
+    }
+    return clone;
   }
 }

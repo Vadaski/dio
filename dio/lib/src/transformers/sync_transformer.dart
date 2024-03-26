@@ -6,6 +6,7 @@ import '../adapter.dart';
 import '../headers.dart';
 import '../options.dart';
 import '../transformer.dart';
+import '../utils.dart';
 
 @Deprecated('Use BackgroundTransformer instead')
 typedef DefaultTransformer = SyncTransformer;
@@ -16,11 +17,9 @@ typedef JsonDecodeCallback = FutureOr<dynamic> Function(String);
 /// The callback definition for encoding a JSON object.
 typedef JsonEncodeCallback = FutureOr<String> Function(Object);
 
-/// The default [Transformer] for [Dio].
-///
 /// If you want to custom the transformation of request/response data,
 /// you can provide a [Transformer] by your self, and replace
-/// the [DefaultTransformer] by setting the [dio.transformer].
+/// the transformer by setting the [Dio.transformer].
 class SyncTransformer extends Transformer {
   SyncTransformer({
     this.jsonDecodeCallback = jsonDecode,
@@ -32,96 +31,73 @@ class SyncTransformer extends Transformer {
 
   @override
   Future<String> transformRequest(RequestOptions options) async {
-    final dynamic data = options.data ?? '';
+    final Object data = options.data ?? '';
     if (data is! String && Transformer.isJsonMimeType(options.contentType)) {
       return jsonEncodeCallback(data);
     } else if (data is Map) {
-      return Transformer.urlEncodeMap(data);
+      if (data is Map<String, dynamic>) {
+        return Transformer.urlEncodeMap(data, options.listFormat);
+      }
+      debugLog(
+        'The data is a type of `Map` (${data.runtimeType}), '
+        'but the transformer can only encode `Map<String, dynamic>`.\n'
+        'If you are writing maps using `{}`, '
+        'consider writing `<String, dynamic>{}`.',
+        StackTrace.current,
+      );
+      return data.toString();
     } else {
       return data.toString();
     }
   }
 
-  /// As an agreement, we return the [response] when the
-  /// Options.responseType is [ResponseType.stream].
   @override
   Future<dynamic> transformResponse(
     RequestOptions options,
-    ResponseBody response,
+    ResponseBody responseBody,
   ) async {
-    if (options.responseType == ResponseType.stream) {
-      return response;
-    }
-    int length = 0;
-    int received = 0;
-    final showDownloadProgress = options.onReceiveProgress != null;
-    if (showDownloadProgress) {
-      length = int.parse(
-        response.headers[Headers.contentLengthHeader]?.first ?? '-1',
-      );
-    }
-    final completer = Completer();
-    final stream = response.stream.transform<Uint8List>(
-      StreamTransformer.fromHandlers(
-        handleData: (data, sink) {
-          sink.add(data);
-          if (showDownloadProgress) {
-            received += data.length;
-            options.onReceiveProgress?.call(received, length);
-          }
-        },
-      ),
-    );
-    // Keep references to the data chunks and concatenate them later.
-    final chunks = <Uint8List>[];
-    int finalSize = 0;
-    final StreamSubscription subscription = stream.listen(
-      (chunk) {
-        finalSize += chunk.length;
-        chunks.add(chunk);
-      },
-      onError: (Object error, StackTrace stackTrace) {
-        completer.completeError(error, stackTrace);
-      },
-      onDone: () => completer.complete(),
-      cancelOnError: true,
-    );
-    options.cancelToken?.whenCancel.then((_) {
-      return subscription.cancel();
-    });
-    await completer.future;
-    // Copy all chunks into a final Uint8List.
-    final responseBytes = Uint8List(finalSize);
-    int chunkOffset = 0;
-    for (final chunk in chunks) {
-      responseBytes.setAll(chunkOffset, chunk);
-      chunkOffset += chunk.length;
+    final responseType = options.responseType;
+    // Do not handled the body for streams.
+    if (responseType == ResponseType.stream) {
+      return responseBody;
     }
 
-    if (options.responseType == ResponseType.bytes) {
+    final chunks = await responseBody.stream.toList();
+    final responseBytes = Uint8List.fromList(chunks.expand((c) => c).toList());
+
+    // Return the finalized bytes if the response type is bytes.
+    if (responseType == ResponseType.bytes) {
       return responseBytes;
     }
 
-    final String? responseBody;
+    final isJsonContent = Transformer.isJsonMimeType(
+      responseBody.headers[Headers.contentTypeHeader]?.first,
+    );
+    final String? response;
     if (options.responseDecoder != null) {
-      responseBody = options.responseDecoder!(
+      final decodeResponse = options.responseDecoder!(
         responseBytes,
         options,
-        response..stream = Stream.empty(),
+        responseBody..stream = Stream.empty(),
       );
-    } else if (responseBytes.isNotEmpty) {
-      responseBody = utf8.decode(responseBytes, allowMalformed: true);
+
+      if (decodeResponse is Future) {
+        response = await decodeResponse;
+      } else {
+        response = decodeResponse;
+      }
+    } else if (!isJsonContent || responseBytes.isNotEmpty) {
+      response = utf8.decode(responseBytes, allowMalformed: true);
     } else {
-      responseBody = null;
+      response = null;
     }
-    if (responseBody != null &&
-        responseBody.isNotEmpty &&
-        options.responseType == ResponseType.json &&
-        Transformer.isJsonMimeType(
-          response.headers[Headers.contentTypeHeader]?.first,
-        )) {
-      return jsonDecodeCallback(responseBody);
+
+    if (response != null &&
+        response.isNotEmpty &&
+        responseType == ResponseType.json &&
+        isJsonContent) {
+      return jsonDecodeCallback(response);
     }
-    return responseBody;
+    return response;
   }
 }

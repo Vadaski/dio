@@ -2,29 +2,51 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:async/async.dart';
+
 import '../adapter.dart';
-import '../dio_error.dart';
+import '../dio_exception.dart';
 import '../options.dart';
 import '../redirect_record.dart';
 
 @Deprecated('Use IOHttpClientAdapter instead. This will be removed in 6.0.0')
 typedef DefaultHttpClientAdapter = IOHttpClientAdapter;
 
+/// The signature of [IOHttpClientAdapter.onHttpClientCreate].
+@Deprecated('Use CreateHttpClient instead. This will be removed in 6.0.0')
 typedef OnHttpClientCreate = HttpClient? Function(HttpClient client);
+
+/// The signature of [IOHttpClientAdapter.createHttpClient].
+/// Can be used to provide a custom [HttpClient] for Dio.
+typedef CreateHttpClient = HttpClient Function();
+
+/// The signature of [IOHttpClientAdapter.validateCertificate].
 typedef ValidateCertificate = bool Function(
   X509Certificate? certificate,
   String host,
   int port,
 );
 
+/// Creates an [IOHttpClientAdapter].
 HttpClientAdapter createAdapter() => IOHttpClientAdapter();
 
 /// The default [HttpClientAdapter] for native platforms.
 class IOHttpClientAdapter implements HttpClientAdapter {
-  /// [Dio] will create HttpClient when it is needed.
-  /// If [onHttpClientCreate] is provided, [Dio] will call
-  /// it when a HttpClient created.
+  IOHttpClientAdapter({
+    @Deprecated('Use createHttpClient instead. This will be removed in 6.0.0')
+    this.onHttpClientCreate,
+    this.createHttpClient,
+    this.validateCertificate,
+  });
+
+  /// [Dio] will create [HttpClient] when it is needed. If [onHttpClientCreate]
+  /// has provided, [Dio] will call it when a [HttpClient] created.
+  @Deprecated('Use createHttpClient instead. This will be removed in 6.0.0')
   OnHttpClientCreate? onHttpClientCreate;
+
+  /// When this callback is set, [Dio] will call it every
+  /// time it needs a [HttpClient].
+  CreateHttpClient? createHttpClient;
 
   /// Allows the user to decide if the response certificate is good.
   /// If this function is missing, then the certificate is allowed.
@@ -34,8 +56,7 @@ class IOHttpClientAdapter implements HttpClientAdapter {
   /// [validateCertificate] evaluates the leaf certificate.
   ValidateCertificate? validateCertificate;
 
-  HttpClient? _defaultHttpClient;
-
+  HttpClient? _cachedHttpClient;
   bool _closed = false;
 
   @override
@@ -46,20 +67,34 @@ class IOHttpClientAdapter implements HttpClientAdapter {
   ) async {
     if (_closed) {
       throw StateError(
-        "Can't establish connection after the adapter was closed!",
+        "Can't establish connection after the adapter was closed.",
       );
     }
-    final httpClient = _configHttpClient(cancelFuture, options.connectTimeout);
+    final operation = CancelableOperation.fromFuture(_fetch(
+      options,
+      requestStream,
+      cancelFuture,
+    ));
+    cancelFuture?.whenComplete(() => operation.cancel());
+    return operation.value;
+  }
+
+  Future<ResponseBody> _fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    final httpClient = _configHttpClient(options.connectTimeout);
     final reqFuture = httpClient.openUrl(options.method, options.uri);
 
     late HttpClientRequest request;
     try {
       final connectionTimeout = options.connectTimeout;
-      if (connectionTimeout != null) {
+      if (connectionTimeout != null && connectionTimeout > Duration.zero) {
         request = await reqFuture.timeout(
           connectionTimeout,
           onTimeout: () {
-            throw DioError.connectionTimeout(
+            throw DioException.connectionTimeout(
               requestOptions: options,
               timeout: connectionTimeout,
             );
@@ -69,21 +104,40 @@ class IOHttpClientAdapter implements HttpClientAdapter {
         request = await reqFuture;
       }
 
+      cancelFuture?.whenComplete(() => request.abort());
+
       // Set Headers
-      options.headers.forEach((k, v) {
-        if (v != null) request.headers.set(k, v);
+      options.headers.forEach((key, value) {
+        if (value != null) {
+          request.headers.set(
+            key,
+            value,
+            preserveHeaderCase: options.preserveHeaderCase,
+          );
+        }
       });
-    } on SocketException catch (e, stackTrace) {
-      if (!e.message.contains('timed out')) {
-        rethrow;
+    } on SocketException catch (e) {
+      if (e.message.contains('timed out')) {
+        final Duration effectiveTimeout;
+        if (options.connectTimeout != null &&
+            options.connectTimeout! > Duration.zero) {
+          effectiveTimeout = options.connectTimeout!;
+        } else if (httpClient.connectionTimeout != null &&
+            httpClient.connectionTimeout! > Duration.zero) {
+          effectiveTimeout = httpClient.connectionTimeout!;
+        } else {
+          effectiveTimeout = Duration.zero;
+        }
+        throw DioException.connectionTimeout(
+          requestOptions: options,
+          timeout: effectiveTimeout,
+          error: e,
+        );
       }
-      throw DioError.connectionTimeout(
+      throw DioException.connectionError(
         requestOptions: options,
-        timeout: options.connectTimeout ??
-            httpClient.connectionTimeout ??
-            Duration.zero,
+        reason: e.message,
         error: e,
-        stackTrace: stackTrace,
       );
     }
 
@@ -95,12 +149,12 @@ class IOHttpClientAdapter implements HttpClientAdapter {
       // Transform the request data.
       Future<dynamic> future = request.addStream(requestStream);
       final sendTimeout = options.sendTimeout;
-      if (sendTimeout != null) {
+      if (sendTimeout != null && sendTimeout > Duration.zero) {
         future = future.timeout(
           sendTimeout,
           onTimeout: () {
             request.abort();
-            throw DioError.sendTimeout(
+            throw DioException.sendTimeout(
               timeout: sendTimeout,
               requestOptions: options,
             );
@@ -110,21 +164,20 @@ class IOHttpClientAdapter implements HttpClientAdapter {
       await future;
     }
 
-    final stopwatch = Stopwatch()..start();
     Future<HttpClientResponse> future = request.close();
-    final receiveTimeout = options.receiveTimeout;
-    if (receiveTimeout != null) {
+    final receiveTimeout = options.receiveTimeout ?? Duration.zero;
+    if (receiveTimeout > Duration.zero) {
       future = future.timeout(
         receiveTimeout,
         onTimeout: () {
-          throw DioError.receiveTimeout(
+          request.abort();
+          throw DioException.receiveTimeout(
             timeout: receiveTimeout,
             requestOptions: options,
           );
         },
       );
     }
-
     final responseStream = await future;
 
     if (validateCertificate != null) {
@@ -136,40 +189,21 @@ class IOHttpClientAdapter implements HttpClientAdapter {
         port,
       );
       if (!isCertApproved) {
-        throw DioError(
+        throw DioException(
           requestOptions: options,
-          type: DioErrorType.badCertificate,
+          type: DioExceptionType.badCertificate,
           error: responseStream.certificate,
           message: 'The certificate of the response is not approved.',
         );
       }
     }
 
-    final stream = responseStream.transform<Uint8List>(
-      StreamTransformer.fromHandlers(handleData: (data, sink) {
-        stopwatch.stop();
-        final duration = stopwatch.elapsed;
-        final receiveTimeout = options.receiveTimeout;
-        if (receiveTimeout != null && duration > receiveTimeout) {
-          sink.addError(
-            DioError.receiveTimeout(
-              timeout: receiveTimeout,
-              requestOptions: options,
-            ),
-          );
-          responseStream.detachSocket().then((socket) => socket.destroy());
-        } else {
-          sink.add(Uint8List.fromList(data));
-        }
-      }),
-    );
-
     final headers = <String, List<String>>{};
     responseStream.headers.forEach((key, values) {
       headers[key] = values;
     });
     return ResponseBody(
-      stream,
+      responseStream.cast(),
       responseStream.statusCode,
       headers: headers,
       isRedirect:
@@ -178,34 +212,35 @@ class IOHttpClientAdapter implements HttpClientAdapter {
           .map((e) => RedirectRecord(e.statusCode, e.method, e.location))
           .toList(),
       statusMessage: responseStream.reasonPhrase,
+      onClose: () {
+        responseStream.detachSocket().then((socket) => socket.destroy());
+      },
     );
   }
 
-  HttpClient _configHttpClient(
-    Future<void>? cancelFuture,
-    Duration? connectionTimeout,
-  ) {
-    HttpClient client = onHttpClientCreate?.call(HttpClient()) ?? HttpClient();
-    if (cancelFuture != null) {
-      client.userAgent = null;
-      client.idleTimeout = Duration(seconds: 0);
-      cancelFuture.whenComplete(() => client.close(force: true));
-      return client..connectionTimeout = connectionTimeout;
+  HttpClient _configHttpClient(Duration? connectionTimeout) {
+    _cachedHttpClient ??= _createHttpClient();
+    connectionTimeout ??= Duration.zero;
+    if (connectionTimeout > Duration.zero) {
+      _cachedHttpClient!.connectionTimeout = connectionTimeout;
+    } else {
+      _cachedHttpClient!.connectionTimeout = null;
     }
-    if (_defaultHttpClient == null) {
-      client.idleTimeout = Duration(seconds: 3);
-      if (onHttpClientCreate?.call(client) != null) {
-        client = onHttpClientCreate!(client)!;
-      }
-      client.connectionTimeout = connectionTimeout;
-      _defaultHttpClient = client;
-    }
-    return _defaultHttpClient!..connectionTimeout = connectionTimeout;
+    return _cachedHttpClient!;
   }
 
   @override
   void close({bool force = false}) {
     _closed = true;
-    _defaultHttpClient?.close(force: force);
+    _cachedHttpClient?.close(force: force);
+  }
+
+  HttpClient _createHttpClient() {
+    if (createHttpClient != null) {
+      return createHttpClient!();
+    }
+    final client = HttpClient()..idleTimeout = Duration(seconds: 3);
+    // ignore: deprecated_member_use, deprecated_member_use_from_same_package
+    return onHttpClientCreate?.call(client) ?? client;
   }
 }

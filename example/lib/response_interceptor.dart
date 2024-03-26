@@ -9,45 +9,44 @@ void main() async {
   const urlNotFound3 = '${urlNotFound}3';
   final dio = Dio();
   dio.options.baseUrl = 'https://httpbin.org/';
-  dio.interceptors.add(InterceptorsWrapper(
-    onResponse: (response, handler) {
-      response.data = json.decode(response.data['data']);
-      handler.next(response);
-    },
-    onError: (DioError e, handler) {
-      if (e.response != null) {
-        switch (e.response!.requestOptions.path) {
-          case urlNotFound:
-            return handler.next(e);
-          case urlNotFound1:
-            handler.resolve(
-              Response(
-                requestOptions: e.requestOptions,
-                data: 'fake data',
-              ),
-            );
-            break;
-          case urlNotFound2:
-            handler.resolve(
-              Response(
-                requestOptions: e.requestOptions,
-                data: 'fake data',
-              ),
-            );
-            break;
-          case urlNotFound3:
-            handler.next(
-              e.copyWith(
-                error: 'custom error info [${e.response!.statusCode}]',
-              ),
-            );
-            break;
+  dio.interceptors.add(
+    InterceptorsWrapper(
+      onResponse: (response, handler) {
+        response.data = json.decode(response.data['data']);
+        handler.next(response);
+      },
+      onError: (DioException error, ErrorInterceptorHandler handler) {
+        final response = error.response;
+        if (response != null) {
+          switch (response.requestOptions.path) {
+            case urlNotFound:
+              return handler.next(error);
+            case urlNotFound1:
+              return handler.resolve(
+                Response(
+                  requestOptions: error.requestOptions,
+                  data: 'fake data',
+                ),
+              );
+            case urlNotFound2:
+              return handler.resolve(
+                Response(
+                  requestOptions: error.requestOptions,
+                  data: 'fake data',
+                ),
+              );
+            case urlNotFound3:
+              return handler.next(
+                error.copyWith(
+                  error: 'custom error info [${response.statusCode}]',
+                ),
+              );
+          }
         }
-      } else {
-        handler.next(e);
-      }
-    },
-  ));
+        handler.next(error);
+      },
+    ),
+  );
 
   Response response;
   response = await dio.post('/post', data: {'a': 5});
@@ -55,7 +54,7 @@ void main() async {
   assert(response.data['a'] == 5);
   try {
     await dio.get(urlNotFound);
-  } on DioError catch (e) {
+  } on DioException catch (e) {
     assert(e.response!.statusCode == 404);
   }
   response = await dio.get('${urlNotFound}1');
@@ -64,7 +63,7 @@ void main() async {
   assert(response.data == 'fake data');
   try {
     await dio.get('${urlNotFound}3');
-  } on DioError catch (e) {
+  } on DioException catch (e) {
     assert(e.message == 'custom error info [404]');
   }
 }
